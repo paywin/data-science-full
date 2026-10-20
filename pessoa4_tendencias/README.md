@@ -1,0 +1,1 @@
+ENOENT: no such file or directory, open 'C:\Users\silvi\Documents\Codex\2026-10-19\microsoft-power-bi-plugin-power-bi\work\repo_stage\pessoa4_tendencias\README.md'
