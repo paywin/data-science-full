@@ -1,123 +1,59 @@
-Warning: fs was declared with const; use let for reassignable variables.
+"""Pessoa 1: extrai e padroniza os dados diários de COVID-19."""
+
+import argparse
 from pathlib import Path
 
 import pandas as pd
 
-# URL dos dados públicos da COVID-19
-url = (
-    "https://catalog.ourworldindata.org/"
-    "garden/covid/latest/compact/compact.csv"
-)
-
-# Caminhos do projeto
-pasta_projeto = Path(__file__).resolve().parent.parent
-pasta_dados = pasta_projeto / "dados"
-arquivo_saida = pasta_dados / "covid.csv"
-
-# Códigos dos países conforme a coluna "code"
-paises = ["BRA", "USA", "CHN", "DEU", "IND"]
+RAIZ = Path(__file__).resolve().parents[1]
+FONTE_COVID = "https://catalog.ourworldindata.org/garden/covid/latest/compact/compact.csv"
+PAISES = {"BRA": "Brasil", "USA": "Estados Unidos", "CHN": "China", "DEU": "Alemanha", "IND": "Índia"}
+COLUNAS = {"date": "data", "code": "pais_codigo", "new_cases": "casos_novos", "total_cases": "casos_acumulados"}
 
 
-def executar_etl():
-    print("Iniciando o ETL da COVID-19...")
-
-    # EXTRACT: carregar os dados
-    df = pd.read_csv(url)
-
-    print(f"Dados recebidos: {len(df)} linhas")
-
-    # Verificar as colunas necessárias
-    colunas_obrigatorias = [
-        "date",
-        "country",
-        "code",
-        "new_cases",
-        "total_cases",
-    ]
-
-    faltantes = [
-        coluna
-        for coluna in colunas_obrigatorias
-        if coluna not in df.columns
-    ]
-
+def transformar_covid(dados: pd.DataFrame) -> pd.DataFrame:
+    """Aceita a fonte original ou um CSV já padronizado; preserva ausências."""
+    tabela = dados.rename(columns=COLUNAS).copy()
+    obrigatorias = {"data", "pais_codigo", "casos_novos", "casos_acumulados"}
+    faltantes = obrigatorias - set(tabela.columns)
     if faltantes:
-        raise ValueError(
-            f"Colunas não encontradas na fonte: {faltantes}"
-        )
-
-    # Selecionar os cinco países
-    df = df[df["code"].isin(paises)].copy()
-
-    if df.empty:
-        raise ValueError(
-            "Nenhum registro encontrado para os países selecionados."
-        )
-
-    # Manter somente as colunas necessárias
-    df = df[
-        ["date", "country", "code", "new_cases", "total_cases"]
-    ].copy()
-
-    # TRANSFORM: tratar datas e valores numéricos
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-    for coluna in ["new_cases", "total_cases"]:
-        df[coluna] = pd.to_numeric(
-            df[coluna], errors="coerce"
-        )
-
-    # Remover registros sem data ou identificação do país
-    df = df.dropna(
-        subset=["date", "country", "code"]
+        raise ValueError(f"Faltam colunas no arquivo COVID: {sorted(faltantes)}")
+    tabela["data"] = pd.to_datetime(tabela["data"], errors="coerce")
+    tabela = tabela.loc[tabela["pais_codigo"].isin(PAISES)].dropna(subset=["data"]).copy()
+    if tabela.empty:
+        raise ValueError("Nenhum dado de COVID encontrado para os países definidos.")
+    if tabela.duplicated(["pais_codigo", "data"]).any():
+        raise ValueError("Há registros duplicados para o mesmo país e data.")
+    tabela["pais"] = tabela["pais_codigo"].map(PAISES)
+    for coluna in ("casos_novos", "casos_acumulados"):
+        tabela[coluna] = pd.to_numeric(tabela[coluna], errors="coerce")
+    tabela = tabela.sort_values(["pais_codigo", "data"]).reset_index(drop=True)
+    tabela["media_movel_7d"] = tabela.groupby("pais_codigo")["casos_novos"].transform(
+        lambda valores: valores.rolling(7, min_periods=1).mean()
     )
-
-    # Ordenar por país e data
-    df = df.sort_values(
-        ["country", "date"]
-    ).reset_index(drop=True)
-
-    # Média móvel de 7 dias
-    df["media_movel_7d"] = (
-        df.groupby("country")["new_cases"]
-        .transform(
-            lambda serie: serie.rolling(
-                window=7, min_periods=1
-            ).mean()
-        )
+    anteriores = tabela.groupby("pais_codigo")["casos_acumulados"].shift(1)
+    tabela["crescimento_casos_pct"] = (
+        (tabela["casos_acumulados"] - anteriores) / anteriores.where(anteriores > 0) * 100
     )
+    return tabela[["pais_codigo", "pais", "data", "casos_novos", "casos_acumulados",
+                   "media_movel_7d", "crescimento_casos_pct"]]
 
-    # Crescimento percentual dos casos acumulados
-    casos_anteriores = (
-        df.groupby("country")["total_cases"].shift(1)
-    )
 
-    df["crescimento_percentual"] = (
-        (
-            df["total_cases"] - casos_anteriores
-        )
-        / casos_anteriores.where(casos_anteriores > 0)
-    ) * 100
-
-    # LOAD: criar a pasta e salvar o CSV
-    pasta_dados.mkdir(parents=True, exist_ok=True)
-
-    df.to_csv(
-        arquivo_saida,
-        index=False,
-        na_rep=""
-    )
-
-    print("\nETL concluído com sucesso!")
-    print(f"Arquivo salvo em: {arquivo_saida}")
-    print(f"Total de registros processados: {len(df)}")
-    print("\nPrévia dos dados:")
-    print(df.head(10).to_string(index=False))
+def executar_etl(entrada: Path | None = None, saida: Path | None = None) -> Path:
+    """Extrai, transforma e grava CSV diário centralizado em dados/."""
+    origem = entrada if entrada is not None else FONTE_COVID
+    destino = saida or RAIZ / "dados" / "covid.csv"
+    dados = pd.read_csv(origem, encoding="utf-8-sig" if entrada else "utf-8")
+    tabela = transformar_covid(dados)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    tabela.to_csv(destino, index=False, encoding="utf-8-sig")
+    print(f"COVID: {len(tabela)} registros -> {destino}")
+    return destino
 
 
 if __name__ == "__main__":
-    try:
-        executar_etl()
-    except Exception as erro:
-        print(f"Erro durante o ETL: {erro}")
-        raise
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--entrada", type=Path, help="CSV local em vez da fonte online")
+    parser.add_argument("--saida", type=Path, help="Destino do CSV padronizado")
+    argumentos = parser.parse_args()
+    executar_etl(argumentos.entrada, argumentos.saida)

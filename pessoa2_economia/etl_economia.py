@@ -1,125 +1,74 @@
-Warning: fs was declared with const; use let for reassignable variables.
-"""
-ETL de indicadores socioeconômicos — Pessoa 2
+"""Pessoa 2: extrai indicadores anuais do Banco Mundial (2019 a 2023)."""
 
-Busca PIB e desemprego no Banco Mundial para 5 países (2019–2023),
-organiza os dados por país/ano, trata valores ausentes e salva CSVs.
+import argparse
+from pathlib import Path
 
-Como executar:
-    pip install pandas requests
-    python etl_economia.py
-"""
-
-import requests
 import pandas as pd
+import requests
 
-# Países escolhidos no planejamento do projeto
-PAISES = {
-    "BRA": "Brasil",
-    "USA": "Estados Unidos",
-    "CHN": "China",
-    "DEU": "Alemanha",
-    "IND": "Índia",
-}
-
-ANO_INICIAL = 2019
-ANO_FINAL = 2023
-
-# Indicadores do Banco Mundial:
-# NY.GDP.MKTP.CD = PIB (US$ correntes)
-# SL.UEM.TOTL.ZS = Desemprego (% da força de trabalho)
+RAIZ = Path(__file__).resolve().parents[1]
+PAISES = {"BRA": "Brasil", "USA": "Estados Unidos", "CHN": "China", "DEU": "Alemanha", "IND": "Índia"}
+ANOS = range(2019, 2024)
 INDICADORES = {
-    "NY.GDP.MKTP.CD": "pib_usd",
-    "SL.UEM.TOTL.ZS": "desemprego_percentual",
+    "NY.GDP.MKTP.CD": "pib_usd_correntes",
+    "NY.GDP.MKTP.KD.ZG": "crescimento_pib_real_pct",
+    "SL.UEM.TOTL.ZS": "desemprego_pct",
+    "SP.POP.TOTL": "populacao",
 }
 
 
-def buscar_indicador(codigo_indicador, nome_coluna):
-    """Busca um indicador no Banco Mundial e devolve uma tabela organizada."""
-    codigos_paises = ";".join(PAISES.keys())
-    url = (
-        "https://api.worldbank.org/v2/country/"
-        f"{codigos_paises}/indicator/{codigo_indicador}"
-    )
-    parametros = {
-        "format": "json",
-        "date": f"{ANO_INICIAL}:{ANO_FINAL}",
-        "per_page": 2000,
-    }
-
-    resposta = requests.get(url, params=parametros, timeout=30)
-    resposta.raise_for_status()
-    dados_json = resposta.json()
-
-    # A API retorna os dados na segunda posição da lista
-    registros = dados_json[1] if len(dados_json) > 1 else []
-
-    linhas = []
-    for item in registros:
-        linhas.append({
-            "pais_codigo": item.get("countryiso3code"),
-            "pais": item.get("country", {}).get("value"),
-            "ano": int(item["date"]),
-            nome_coluna: item.get("value"),
-        })
-
-    return pd.DataFrame(linhas)
+def buscar_indicador(codigo: str, coluna: str) -> pd.DataFrame:
+    """Consulta a API por país, rejeitando resposta inválida sem gerar dados fictícios."""
+    registros = []
+    for pais_codigo in PAISES:
+        url = f"https://api.worldbank.org/v2/country/{pais_codigo}/indicator/{codigo}"
+        resposta = requests.get(url, params={"format": "json", "date": "2019:2023", "per_page": 100}, timeout=40)
+        resposta.raise_for_status()
+        conteudo = resposta.json()
+        if not isinstance(conteudo, list) or len(conteudo) < 2 or (conteudo[1] is not None and not isinstance(conteudo[1], list)):
+            raise ValueError(f"Resposta inesperada da API do Banco Mundial para {pais_codigo}/{codigo}")
+        for item in conteudo[1] or []:
+            if str(item.get("date", "")).isdigit():
+                registros.append({"pais_codigo": pais_codigo, "ano": int(item["date"]), coluna: item.get("value")})
+    tabela = pd.DataFrame(registros, columns=["pais_codigo", "ano", coluna])
+    if tabela.duplicated(["pais_codigo", "ano"]).any():
+        raise ValueError(f"A API retornou dados duplicados para {codigo}")
+    tabela[coluna] = pd.to_numeric(tabela[coluna], errors="coerce")
+    return tabela
 
 
-def executar_etl():
-    """Executa a extração, limpeza e gravação dos arquivos."""
-    tabelas = []
+def montar_economia(tabelas: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Garante 25 pares país/ano e mantém valores desconhecidos como NaN."""
+    economia = pd.MultiIndex.from_product([PAISES, ANOS], names=["pais_codigo", "ano"]).to_frame(index=False)
+    for coluna in INDICADORES.values():
+        if coluna not in tabelas:
+            raise ValueError(f"Indicador não fornecido: {coluna}")
+        economia = economia.merge(tabelas[coluna], on=["pais_codigo", "ano"], how="left", validate="one_to_one")
+    economia.insert(1, "pais", economia["pais_codigo"].map(PAISES))
+    return economia.sort_values(["pais_codigo", "ano"]).reset_index(drop=True)
 
-    for codigo_indicador, nome_coluna in INDICADORES.items():
-        print(f"Buscando {nome_coluna}...")
-        tabela = buscar_indicador(codigo_indicador, nome_coluna)
-        tabelas.append(tabela)
 
-    # Junta PIB e desemprego usando país e ano como chave
-    economia = tabelas[0].merge(
-        tabelas[1],
-        on=["pais_codigo", "pais", "ano"],
-        how="outer"
-    )
-
-    # Garante que todos os países e anos estejam representados
-    anos = list(range(ANO_INICIAL, ANO_FINAL + 1))
-    grade = pd.MultiIndex.from_product(
-        [PAISES.keys(), anos],
-        names=["pais_codigo", "ano"]
-    ).to_frame(index=False)
-
-    economia = grade.merge(
-        economia,
-        on=["pais_codigo", "ano"],
-        how="left"
-    )
-
-    # Preenche o nome do país caso algum indicador esteja ausente
-    economia["pais"] = economia["pais"].fillna(
-        economia["pais_codigo"].map(PAISES)
-    )
-
-    # Mantém valores ausentes como NaN (não inventa dados).
-    # Também gera uma tabela simples com a quantidade de ausências.
-    colunas_indicadores = ["pib_usd", "desemprego_percentual"]
-    resumo_ausentes = (
-        economia.groupby("pais")[colunas_indicadores]
-        .apply(lambda grupo: grupo.isna().sum())
-        .reset_index()
-    )
-
-    # Ordena para facilitar o uso na análise e no Power BI
-    economia = economia.sort_values(["pais", "ano"]).reset_index(drop=True)
-
-    economia.to_csv("economia_paises_2019_2023.csv", index=False, encoding="utf-8-sig")
-    resumo_ausentes.to_csv("resumo_valores_ausentes.csv", index=False, encoding="utf-8-sig")
-
-    print("\nETL concluído!")
-    print("Arquivo principal: economia_paises_2019_2023.csv")
-    print("Resumo de ausências: resumo_valores_ausentes.csv")
-    print(f"Total de linhas: {len(economia)}")
+def executar_etl(saida: Path | None = None) -> Path:
+    destino = saida or RAIZ / "dados"
+    tabelas = {}
+    for codigo, coluna in INDICADORES.items():
+        print(f"Banco Mundial: buscando {coluna}...")
+        tabelas[coluna] = buscar_indicador(codigo, coluna)
+    economia = montar_economia(tabelas)
+    colunas = list(INDICADORES.values())
+    if economia[colunas].notna().sum().sum() == 0:
+        raise ValueError("A API não retornou valores econômicos válidos; nenhum CSV foi gravado.")
+    destino.mkdir(parents=True, exist_ok=True)
+    arquivo = destino / "economia_paises_2019_2023.csv"
+    economia.to_csv(arquivo, index=False, encoding="utf-8-sig")
+    resumo = economia.groupby(["pais_codigo", "pais"], as_index=False)[colunas].agg(lambda serie: int(serie.isna().sum()))
+    resumo.to_csv(destino / "resumo_valores_ausentes.csv", index=False, encoding="utf-8-sig")
+    print(f"Economia: {len(economia)} registros -> {arquivo}")
+    return arquivo
 
 
 if __name__ == "__main__":
-    executar_etl()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--saida", type=Path, help="Pasta de CSVs gerados")
+    argumentos = parser.parse_args()
+    executar_etl(argumentos.saida)
