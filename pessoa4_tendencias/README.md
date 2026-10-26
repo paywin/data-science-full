@@ -1,3 +1,0 @@
-# Pessoa 4 — Tendências temporais (Mateus)
-
-Execute `python pessoa4_tendencias/etl_tendencias.py` após o ETL de impacto. A entrada padrão é `dados/base_integrada_pais_ano.csv`, e os três arquivos de saída são `dados/tendencias_anual_pais.csv`, `dados/variacoes_anuais_pais.csv` e `dados/choque_2020_vs_2019.csv`. Alterações nas taxas de crescimento real do PIB e desemprego são registradas em **pontos percentuais** (`_pp`). As variações percentuais em valores monetários ou casos exigem um ano anterior positivo. Não são fabricados valores ausentes e não se faz média de registros duplicados: duplicatas geram erro explícito. Consulte o README da raiz para instruções completas.

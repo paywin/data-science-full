@@ -1,10 +1,6 @@
-__pycache__/
-.pytest_cache/
 .venv/
-venv/
-*.py[cod]
-/dados/
-/logs/
-/.tools/
-/.mongo/
+__pycache__/
+dados/
 .env
+.tools/
+.mongo/
