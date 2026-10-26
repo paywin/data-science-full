@@ -4,7 +4,11 @@ import argparse
 import calendar
 from pathlib import Path
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
+from infra import carregar_mongo, salvar_csv
+from pessoa1_covid.etl_covid import transformar_covid
 
 RAIZ = Path(__file__).resolve().parents[1]
 PAISES = {"BRA": "Brasil", "USA": "Estados Unidos", "CHN": "China", "DEU": "Alemanha", "IND": "Índia"}
@@ -17,36 +21,22 @@ RENOMEAR_ECONOMIA = {"pib_usd": "pib_usd_correntes", "pib_crescimento_real_pct":
 
 def agregar_covid(dados: pd.DataFrame) -> pd.DataFrame:
     """Agrega os registros diários por país/ano sem preencher ausências com zero."""
-    tabela = dados.rename(columns=RENOMEAR_COVID).copy()
-    obrigatorias = {"data", "pais_codigo", "casos_novos", "casos_acumulados"}
-    if obrigatorias - set(tabela.columns):
-        raise ValueError(f"CSV COVID sem colunas: {sorted(obrigatorias - set(tabela.columns))}")
-    tabela["data"] = pd.to_datetime(tabela["data"], errors="coerce")
-    tabela = tabela.dropna(subset=["data"]).copy()
+    tabela = transformar_covid(dados)
     tabela["ano"] = tabela["data"].dt.year
-    tabela = tabela.loc[tabela["pais_codigo"].isin(PAISES) & tabela["ano"].isin(ANOS)].copy()
-    if tabela.duplicated(["pais_codigo", "data"]).any():
-        raise ValueError("COVID contém datas duplicadas para um mesmo país.")
-    for coluna in ("casos_novos", "casos_acumulados"):
-        tabela[coluna] = pd.to_numeric(tabela[coluna], errors="coerce")
-    if "media_movel_7d" not in tabela:
-        tabela = tabela.sort_values(["pais_codigo", "data"])
-        tabela["media_movel_7d"] = tabela.groupby("pais_codigo")["casos_novos"].transform(
-            lambda serie: serie.rolling(7, min_periods=1).mean()
-        )
-    else:
-        tabela["media_movel_7d"] = pd.to_numeric(tabela["media_movel_7d"], errors="coerce")
-    tabela = tabela.sort_values(["pais_codigo", "data"])
     agregado = tabela.groupby(["pais_codigo", "ano"], as_index=False).agg(
         casos_novos_ano=("casos_novos", lambda serie: serie.sum(min_count=1)),
         pico_media_movel_7d=("media_movel_7d", "max"),
-        casos_acumulados_fim_ano=("casos_acumulados", "last"),
+        casos_acumulados_fim_ano=("casos_acumulados", lambda serie: serie.iloc[-1]),
+        ultima_data_covid=("data", "max"),
         dias_com_casos=("casos_novos", "count"),
         dias_observados=("data", "nunique"),
     )
     agregado["dias_calendario"] = agregado["ano"].map(lambda ano: 366 if calendar.isleap(int(ano)) else 365)
     agregado["cobertura_covid"] = agregado["dias_com_casos"] / agregado["dias_calendario"]
-    agregado["covid_observado"] = 1
+    agregado["covid_observado"] = (agregado["dias_com_casos"] > 0).astype(int)
+    fim_ano = pd.to_datetime(agregado["ano"].astype(str) + "-12-31")
+    agregado.loc[agregado["ultima_data_covid"] != fim_ano, "casos_acumulados_fim_ano"] = float("nan")
+    agregado["cobertura_adequada"] = agregado["cobertura_covid"] >= 0.9
     return agregado.drop(columns=["dias_com_casos", "dias_observados", "dias_calendario"])
 
 
@@ -71,6 +61,7 @@ def integrar_dados(covid: pd.DataFrame, economia: pd.DataFrame) -> pd.DataFrame:
     tabela.insert(1, "pais", tabela["pais_codigo"].map(PAISES))
     tabela = tabela.sort_values(["pais_codigo", "ano"]).reset_index(drop=True)
     tabela["covid_observado"] = tabela["covid_observado"].fillna(0).astype(int)
+    tabela["cobertura_adequada"] = tabela["cobertura_covid"].ge(0.9)
     tabela["fase"] = tabela["ano"].map(lambda ano: "Pré-pandemia" if ano == 2019
                                      else ("Fase crítica" if ano <= 2021 else "Pós-pico"))
     # 2019 é referência pré-pandemia, não uma medição diária de COVID.
@@ -86,9 +77,11 @@ def integrar_dados(covid: pd.DataFrame, economia: pd.DataFrame) -> pd.DataFrame:
     return tabela
 
 
-def calcular_correlacoes(base: pd.DataFrame) -> pd.DataFrame:
+def calcular_correlacoes(base: pd.DataFrame, cobertura_minima: float = 0.9) -> pd.DataFrame:
     """Pearson/Spearman por ano e agregado; associação não implica causalidade."""
-    colunas = ["escopo", "ano", "indicador_covid", "indicador_economico", "observacoes", "pearson_r", "spearman_rho"]
+    if not 0 <= cobertura_minima <= 1:
+        raise ValueError("Cobertura mínima deve estar entre 0 e 1")
+    colunas = ["cobertura_minima", "excluidos_baixa_cobertura", "escopo", "ano", "indicador_covid", "indicador_economico", "observacoes", "pearson_r", "spearman_rho"]
     pares = [("casos_por_milhao", "crescimento_pib_real_pct"),
              ("casos_por_milhao", "desemprego_pct"),
              ("pico_media_movel_por_milhao", "crescimento_pib_real_pct"),
@@ -98,6 +91,9 @@ def calcular_correlacoes(base: pd.DataFrame) -> pd.DataFrame:
     grupos = [("geral", "2020-2023", filtrada)] + [("anual", str(ano), filtrada.loc[filtrada["ano"] == ano])
                                                   for ano in range(2020, 2024)]
     for escopo, ano, grupo in grupos:
+        elegivel = grupo["cobertura_covid"].ge(cobertura_minima)
+        excluidos = int((~elegivel).sum())
+        grupo = grupo.loc[elegivel]
         for indicador_covid, indicador_economico in pares:
             valores = grupo[[indicador_covid, indicador_economico]].dropna()
             if len(valores) < 3 or any(valores[col].nunique() < 2 for col in valores.columns):
@@ -105,7 +101,7 @@ def calcular_correlacoes(base: pd.DataFrame) -> pd.DataFrame:
             else:
                 pearson = valores[indicador_covid].corr(valores[indicador_economico], method="pearson")
                 spearman = valores[indicador_covid].corr(valores[indicador_economico], method="spearman")
-            registros.append({"escopo": escopo, "ano": ano, "indicador_covid": indicador_covid,
+            registros.append({"cobertura_minima": cobertura_minima, "excluidos_baixa_cobertura": excluidos, "escopo": escopo, "ano": ano, "indicador_covid": indicador_covid,
                               "indicador_economico": indicador_economico, "observacoes": len(valores),
                               "pearson_r": pearson, "spearman_rho": spearman})
     return pd.DataFrame(registros, columns=colunas)
@@ -130,9 +126,14 @@ def executar_etl(caminho_covid: Path | None = None, caminho_economia: Path | Non
     base = integrar_dados(covid, economia)
     destino.mkdir(parents=True, exist_ok=True)
     arquivo = destino / "base_integrada_pais_ano.csv"
-    base.to_csv(arquivo, index=False, encoding="utf-8-sig")
-    calcular_correlacoes(base).to_csv(destino / "correlacoes.csv", index=False, encoding="utf-8-sig")
-    comparar_2020(base).to_csv(destino / "variacao_2020_vs_2019.csv", index=False, encoding="utf-8-sig")
+    correlacoes = calcular_correlacoes(base)
+    comparacao = comparar_2020(base)
+    salvar_csv(base, arquivo)
+    salvar_csv(correlacoes, destino / "correlacoes.csv")
+    salvar_csv(comparacao, destino / "variacao_2020_vs_2019.csv")
+    carregar_mongo(base, "base_integrada_pais_ano", ["pais_codigo", "ano"])
+    carregar_mongo(correlacoes, "correlacoes", ["escopo", "ano", "indicador_covid", "indicador_economico"])
+    carregar_mongo(comparacao, "variacao_2020_vs_2019", ["pais_codigo"])
     print(f"Impacto: {len(base)} registros -> {arquivo}")
     return arquivo
 

@@ -1,2 +1,4 @@
 pandas>=2.0,<3
 requests>=2.31,<3
+scipy>=1.11,<2
+pymongo>=4.6,<5

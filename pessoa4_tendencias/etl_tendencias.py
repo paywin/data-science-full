@@ -3,7 +3,10 @@
 import argparse
 from pathlib import Path
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
+from infra import carregar_mongo, salvar_csv
 
 RAIZ = Path(__file__).resolve().parents[1]
 METRICAS = ("casos_novos_ano", "pico_media_movel_7d", "casos_acumulados_fim_ano",
@@ -18,12 +21,19 @@ def criar_tabelas(base: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
         raise ValueError(f"Base integrada sem colunas: {sorted(obrigatorias - set(base.columns))}")
     if base.duplicated(["pais_codigo", "ano"]).any():
         raise ValueError("Base integrada contém país/ano duplicado: corrija a origem.")
+    base = base.copy()
+    anos = pd.to_numeric(base["ano"], errors="raise")
+    if anos.isna().any() or (anos % 1 != 0).any():
+        raise ValueError("Ano inválido na base integrada")
+    base["ano"] = anos.astype(int)
     anual = base.sort_values(["pais_codigo", "ano"]).reset_index(drop=True).copy()
     for coluna in METRICAS:
         anual[coluna] = pd.to_numeric(anual[coluna], errors="coerce")
     variacoes = anual[["pais_codigo", "pais", "ano", "fase"]].copy()
     for coluna in METRICAS:
         anterior = anual.groupby("pais_codigo")[coluna].shift(1)
+        ano_anterior = anual.groupby("pais_codigo")["ano"].shift(1)
+        anterior = anterior.where(anual["ano"] - ano_anterior == 1)
         referencia_2019 = anual.loc[anual["ano"] == 2019].set_index("pais_codigo")[coluna]
         base_referencia = anual["pais_codigo"].map(referencia_2019)
         diferenca = anual[coluna] - anterior
@@ -46,7 +56,8 @@ def executar_etl(entrada: Path | None = None, saida: Path | None = None) -> dict
     arquivos = {"tendencias_anual_pais.csv": anual, "variacoes_anuais_pais.csv": variacoes,
                 "choque_2020_vs_2019.csv": choque}
     for nome, tabela in arquivos.items():
-        tabela.to_csv(destino / nome, index=False, encoding="utf-8-sig")
+        salvar_csv(tabela, destino / nome)
+        carregar_mongo(tabela, Path(nome).stem, ["pais_codigo", "ano"])
         print(f"Tendências: {len(tabela)} registros -> {destino / nome}")
     return {nome: destino / nome for nome in arquivos}
 

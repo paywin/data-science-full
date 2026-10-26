@@ -3,5 +3,8 @@ __pycache__/
 .venv/
 venv/
 *.py[cod]
-# Saídas geradas pelos ETLs (o CSV legado da Pessoa 1 permanece versionado)
-/dados/*.csv
+/dados/
+/logs/
+/.tools/
+/.mongo/
+.env

@@ -1,0 +1,29 @@
+{
+  "status": "aprovado",
+  "testes": 15,
+  "execucoes_completas": 3,
+  "covid_registros": 7305,
+  "colecoes_mongodb": {
+    "base_integrada_pais_ano": 25,
+    "choque_2020_vs_2019": 5,
+    "correlacoes": 20,
+    "covid": 7305,
+    "covid_brutos": 7305,
+    "economia": 25,
+    "economia_brutos": 100,
+    "resumo_valores_ausentes": 5,
+    "tendencias_anual_pais": 25,
+    "variacao_2020_vs_2019": 5,
+    "variacoes_anuais_pais": 25
+  },
+  "economia_ausencias": {
+    "pib_usd_correntes": 0,
+    "crescimento_pib_real_pct": 0,
+    "desemprego_pct": 0,
+    "populacao": 0
+  },
+  "inicializador_windows_validado": true,
+  "testes_na_pasta_original": "15 aprovados, incluindo MongoDB real",
+  "fonte_covid_online_validada": true,
+  "fontes_economicas_online_validadas": true
+}

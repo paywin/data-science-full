@@ -45,12 +45,10 @@ class TestesETL(unittest.TestCase):
         self.assertEqual(len(economia), 25)
         self.assertTrue(pd.isna(economia.query("pais_codigo == 'USA' and ano == 2020")["desemprego_pct"].iloc[0]))
 
-    @patch("pessoa2_economia.etl_economia.requests.get")
-    def test_api_aceita_lista_vazia(self, chamada):
-        chamada.return_value.json.return_value = [{"page": 1}, None]
-        tabela = buscar_indicador("NY.GDP.MKTP.CD", "pib_usd_correntes")
-        self.assertEqual(len(tabela), 0)
-        self.assertEqual(chamada.call_count, 5)
+    def test_api_rejeita_lista_vazia(self):
+        from pessoa2_economia.etl_economia import validar_resposta
+        with self.assertRaises(ValueError):
+            validar_resposta(b'[{"pages": 1}, null]')
 
     def test_integracao_legada_e_variacoes(self):
         base = integrar_dados(self.covid, self.economia)
